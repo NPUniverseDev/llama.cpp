@@ -8,6 +8,15 @@ endif()
 
 find_package(Vulkan COMPONENTS glslc REQUIRED)
 
+if (NOT Vulkan_GLSLC_EXECUTABLE OR Vulkan_GLSLC_EXECUTABLE STREQUAL "Vulkan_GLSLC_EXECUTABLE-NOTFOUND")
+    message(STATUS "glslc not found via Vulkan SDK, searching in NDK")
+    find_program(Vulkan_GLSLC_EXECUTABLE
+        NAMES glslc glslc.exe
+        PATHS "${ANDROID_NDK}/shader-tools"
+        NO_DEFAULT_PATH
+    )
+endif()
+
 if (DEFINED ENV{VULKAN_SDK})
     list(APPEND CMAKE_PREFIX_PATH "$ENV{VULKAN_SDK}")
 endif()
@@ -20,11 +29,34 @@ endif()
 
 function(detect_host_compiler)
     if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
-        find_program(HOST_C_COMPILER NAMES cl gcc clang NO_CMAKE_FIND_ROOT_PATH)
-        find_program(HOST_CXX_COMPILER NAMES cl g++ clang++ NO_CMAKE_FIND_ROOT_PATH)
+        find_program(HOST_C_COMPILER NAMES cl gcc clang
+            HINTS "C:/msys64/mingw64/bin" "C:/Program Files/LLVM/bin" "C:/Strawberry/c/bin"
+            NO_CMAKE_FIND_ROOT_PATH
+        )
+        if (HOST_C_COMPILER MATCHES ".*[Aa]ndroid.*" OR HOST_C_COMPILER MATCHES ".*[Nn][Dd][Kk].*")
+            unset(HOST_C_COMPILER CACHE)
+            find_program(HOST_C_COMPILER NAMES cl.exe
+                PATHS "C:/Windows/System32"
+                NO_DEFAULT_PATH
+            )
+        endif()
+        find_program(HOST_CXX_COMPILER NAMES cl g++ clang++
+            HINTS "C:/msys64/mingw64/bin" "C:/Program Files/LLVM/bin" "C:/Strawberry/c/bin"
+            NO_CMAKE_FIND_ROOT_PATH
+        )
+        if (HOST_CXX_COMPILER MATCHES ".*[Aa]ndroid.*" OR HOST_CXX_COMPILER MATCHES ".*[Nn][Dd][Kk].*")
+            unset(HOST_CXX_COMPILER CACHE)
+            find_program(HOST_CXX_COMPILER NAMES cl.exe
+                PATHS "C:/Windows/System32"
+                NO_DEFAULT_PATH
+            )
+        endif()
     else()
         find_program(HOST_C_COMPILER NAMES gcc clang NO_CMAKE_FIND_ROOT_PATH)
         find_program(HOST_CXX_COMPILER NAMES g++ clang++ NO_CMAKE_FIND_ROOT_PATH)
+    endif()
+    if (NOT HOST_C_COMPILER OR NOT HOST_CXX_COMPILER)
+        message(WARNING "Host compiler not found or pointing to NDK. Shader generation might fail.")
     endif()
     set(HOST_C_COMPILER "${HOST_C_COMPILER}" PARENT_SCOPE)
     set(HOST_CXX_COMPILER "${HOST_CXX_COMPILER}" PARENT_SCOPE)
@@ -163,7 +195,6 @@ if (Vulkan_FOUND)
             set(HOST_CMAKE_TOOLCHAIN_FILE ${CMAKE_BINARY_DIR}/host-toolchain.cmake)
         endif()
     else()
-        # For non-cross-compiling, use empty toolchain (use host compiler)
         set(HOST_CMAKE_TOOLCHAIN_FILE "")
     endif()
 
@@ -174,24 +205,49 @@ if (Vulkan_FOUND)
         message(STATUS "vulkan-shaders-gen toolchain file: ${HOST_CMAKE_TOOLCHAIN_FILE}")
     endif()
 
+    if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows" AND CMAKE_CROSSCOMPILING)
+        set(VSG_GENERATOR "NMake Makefiles")
+        message(STATUS "vulkan-shaders-gen: Using NMake for host project to avoid Ninja conflicts")
+    else()
+        set(VSG_GENERATOR "${CMAKE_GENERATOR}")
+    endif()
+
+    set(VSG_WRAPPER "")
+    if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows" AND CMAKE_CROSSCOMPILING)
+        set(VC_VARS_LOCATIONS
+            "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Auxiliary/Build/vcvars64.bat"
+            "C:/Program Files/Microsoft Visual Studio/2022/BuildTools/VC/Auxiliary/Build/vcvars64.bat"
+            "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/VC/Auxiliary/Build/vcvars64.bat"
+            "C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/VC/Auxiliary/Build/vcvars64.bat"
+        )
+        foreach(LOC ${VC_VARS_LOCATIONS})
+            if(EXISTS "${LOC}")
+                file(TO_NATIVE_PATH "${LOC}" VC_VARS_PATH_NATIVE)
+                set(WRAPPER_SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/vsg_env_wrapper.bat")
+                file(WRITE "${WRAPPER_SCRIPT}" "@echo off\r\ncall \"${VC_VARS_PATH_NATIVE}\" >nul 2>&1\r\n%*\r\n")
+                message(STATUS "Created VS environment wrapper at: ${WRAPPER_SCRIPT}")
+                set(VSG_WRAPPER cmd /c "${WRAPPER_SCRIPT}")
+                break()
+            endif()
+        endforeach()
+    endif()
+
+    set(VSG_CMAKE_ARGS
+        -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR}/$<CONFIG>
+        -DCMAKE_INSTALL_BINDIR=.
+        -DCMAKE_BUILD_TYPE=$<CONFIG>
+        -G${VSG_GENERATOR}
+        ${VULKAN_SHADER_GEN_CMAKE_ARGS}
+    )
+
     ExternalProject_Add(
         vulkan-shaders-gen
         SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/vulkan-shaders
-        CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR}/$<CONFIG>
-                   -DCMAKE_INSTALL_BINDIR=.
-                   -DCMAKE_BUILD_TYPE=$<CONFIG>
-                   ${VULKAN_SHADER_GEN_CMAKE_ARGS}
-
-        BUILD_COMMAND ${CMAKE_COMMAND} --build . --config $<CONFIG>
+        CMAKE_ARGS ${VSG_CMAKE_ARGS}
+        CONFIGURE_COMMAND ${VSG_WRAPPER} ${CMAKE_COMMAND} ${VSG_CMAKE_ARGS} ${CMAKE_CURRENT_SOURCE_DIR}/vulkan-shaders
+        BUILD_COMMAND ${VSG_WRAPPER} ${CMAKE_COMMAND} --build . --config $<CONFIG>
         BUILD_ALWAYS  TRUE
-
-        # NOTE: When DESTDIR is set using Makefile generators and
-        # "make install" triggers the build step, vulkan-shaders-gen
-        # would be installed into the DESTDIR prefix, so it is unset
-        # to ensure that does not happen.
-
-        INSTALL_COMMAND ${CMAKE_COMMAND} -E env --unset=DESTDIR
-                        ${CMAKE_COMMAND} --install . --config $<CONFIG>
+        INSTALL_COMMAND ${VSG_WRAPPER} ${CMAKE_COMMAND} -E env --unset=DESTDIR ${CMAKE_COMMAND} --install . --config $<CONFIG>
     )
 
     set (_ggml_vk_host_suffix $<IF:$<STREQUAL:${CMAKE_HOST_SYSTEM_NAME},Windows>,.exe,>)
@@ -216,7 +272,7 @@ if (Vulkan_FOUND)
 
     add_custom_command(
         OUTPUT ${_ggml_vk_header}
-        COMMAND ${_ggml_vk_genshaders_cmd}
+        COMMAND ${VSG_WRAPPER} "${_ggml_vk_genshaders_cmd}"
             --output-dir ${_ggml_vk_output_dir}
             --target-hpp ${_ggml_vk_header}
         DEPENDS ${_ggml_vk_shaders_gen_sources}
@@ -232,7 +288,7 @@ if (Vulkan_FOUND)
         add_custom_command(
             OUTPUT  ${_ggml_vk_target_cpp}
             DEPFILE ${_ggml_vk_target_cpp}.d
-            COMMAND ${_ggml_vk_genshaders_cmd}
+            COMMAND ${VSG_WRAPPER} "${_ggml_vk_genshaders_cmd}"
                 --glslc      ${Vulkan_GLSLC_EXECUTABLE}
                 --source     ${file_full}
                 --output-dir ${_ggml_vk_output_dir}
