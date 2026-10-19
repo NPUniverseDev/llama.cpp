@@ -125,11 +125,26 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Resolve OpenVINO version
+        id: ov
+        shell: pwsh
+        run: |
+          # upstream pins here the SDK version for its ggml-openvino backend
+          $file = ".devops/openvino.Dockerfile"
+          $m = Select-String -Path $file -Pattern '^ARG OPENVINO_VERSION_MAJOR=(\S+)' | Select-Object -First 1
+          $f = Select-String -Path $file -Pattern '^ARG OPENVINO_VERSION_FULL=(\S+)'  | Select-Object -First 1
+          if (-not $m -or -not $f) {
+            "::error::$file must define OPENVINO_VERSION_MAJOR and OPENVINO_VERSION_FULL"
+            exit 1
+          }
+          "major=$($m.Matches[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
+          "full=$($f.Matches[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
+
       - name: Install OpenVINO SDK
         shell: pwsh
         run: |
-          $versionMajor = "2026.2.1"
-          $versionFull = "2026.2.1.21919.ede283a88e3"
+          $versionMajor = "${{ steps.ov.outputs.major }}"
+          $versionFull = "${{ steps.ov.outputs.full }}"
           $url = "https://storage.openvinotoolkit.org/repositories/openvino/packages/${versionMajor}/windows/openvino_toolkit_windows_${versionFull}_x86_64.zip"
           $zipPath = "$env:RUNNER_TEMP\openvino.zip"
           curl.exe -L -o $zipPath $url
@@ -173,13 +188,13 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ needs.get-tag.outputs.name }}"
-          7z a -snl "llama-${tag}-bin-win-openvino-2026.2.1-x64.zip" .\build\bin\Release\*
+          7z a -snl "llama-${tag}-bin-win-openvino-${{ steps.ov.outputs.major }}-x64.zip" .\build\bin\Release\*
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
           name: llama-bin-win-openvino-x64.zip
-          path: llama-${{ needs.get-tag.outputs.name }}-bin-win-openvino-2026.2.1-x64.zip
+          path: llama-${{ needs.get-tag.outputs.name }}-bin-win-openvino-${{ steps.ov.outputs.major }}-x64.zip
           if-no-files-found: error
 
   linux-vulkan-x64:
