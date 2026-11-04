@@ -199,7 +199,7 @@ jobs:
 
   linux-vulkan-x64:
     needs: [get-tag]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
@@ -283,7 +283,7 @@ jobs:
 
   android-vulkan-arm64:
     needs: [get-tag]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
